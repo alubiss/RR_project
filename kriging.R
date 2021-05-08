@@ -97,3 +97,15 @@ result1
 result2<-automapPlot(ok.xy$krige_output, "var1.pred", main="Universal
 kriging, \n Cartesian coordinates function") 
 result2
+
+## universal, dist
+#result3<-automapPlot(ok.xy$krige_output, "var1.pred", main="Universal kriging, \n distance to Lublin") 
+#result3
+
+library(Metrics)
+rmse_ord <- rmse(output$N, ok.xy$krige_output@data$var1.pred) 
+rmse_un_xy <- rmse(output$N, uk.xy$krige_output@data$var1.pred) 
+#rmse_un_dist <- rmse(output$N, uk.dist$krige_output@data$var1.pred)
+
+rmse_ord
+rmse_un_xy

@@ -45,6 +45,33 @@ res_rf_cv<-sperrorest(modelformula,
 round(summary(res_rf_cv$error_rep), 3)
 
 
+
+# RF basic
+set.seed(1234)
+random.forest <- randomForest(modelformula,
+                                    data = train,
+                                    ntree = 50,
+                                    sampsize = 50,
+                                    mtry = 6,
+                                    importance = TRUE)
+
+print(random.forest)
+
+tc <- trainControl(method = "cv",
+                   number = 5)
+parameters_rf <- expand.grid(mtry = 1:10)
+set.seed(1234)
+random.forest_2 <- 
+  train(modelformula, 
+        data = train, 
+        method = "rf", 
+        ntree=50,
+        tuneGrid = parameters_rf, 
+        trControl = tc,
+        importance = TRUE)
+print(random.forest_2)
+
+
 # losowanie oparte na k-średnich
 resamp <- partition_kmeans(train, nfold = 5, coords = c('x', 'y'),
                            repetition = 1, seed1 = 1234)
@@ -54,7 +81,7 @@ plot(resamp, train, coords = c("x","y"))
 set.seed(1234)
 res_rf_kmeans<-sperrorest(modelformula, data=train, 
                           model_fun=randomForest, 
-                          model_args=list(ntree=150, mtry=90), 
+                          model_args=list(ntree=50, mtry=1), 
                           smp_fun=partition_kmeans, 
                           progres='all', 
                           smp_args=list(repetition=100, nfold=5, seed1=1234))

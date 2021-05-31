@@ -1,0 +1,358 @@
+---
+title: "RR project"
+author: "Aleksandra Lubicka, Rafał Kaczmarek"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 3
+    code_folding: hide
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+    latex_engine: xelatex
+  word_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center', out.width = '80%', echo = TRUE)
+library("readxl")
+library(dplyr)
+library(tidyverse)
+library(sf)
+library(osmdata)    
+#devtools::install_github('osmdatar/osmdata')
+library(ggmap)
+library(leaflet) 
+library(rgdal)
+library(GISTools)
+library(sp)
+#library(spdep)
+#library(spatialreg)
+library(corrplot)
+library(caret)
+#library(dismo)
+library(fields)
+library(gridExtra)
+#library(gstat)
+#library(pgirmess)
+#library(raster)
+#library(rasterVis)
+library(rgeos)
+library(shapefiles)
+library(geoR)
+library(maptools)
+#library(spdep)
+library(rgdal)
+library(sp)
+library(spatstat)
+library("readxl")
+# python from Rmd
+#conda activate r-reticulate
+library(reticulate)
+use_python('/opt/anaconda3/bin/python')
+#py_install("contextily")
+library(randomForest)
+library(sperrorest)
+library(automap)
+library(Metrics)
+library(kableExtra)
+```
+
+# 1. Dataset
+
+There are **120 points** located on the area of Warsaw. The point map allows identifying the main spatial features of the studied phenomenon and locating local outliers.
+```{python, message=FALSE, warning=FALSE, error=FALSE, fig.cap = 'Figure 1. Map'}
+import pandas as pd
+import geopandas
+import matplotlib.pyplot as plt
+import contextily
+pop_df_warsaw = pd.read_csv("pop_df_warsaw.csv")
+df = pd.read_csv("dane.csv")
+pop_df_warsaw = geopandas.GeoDataFrame(pop_df_warsaw, geometry=geopandas.points_from_xy(pop_df_warsaw.SHAPE_Leng, pop_df_warsaw.SHAPE_Area), crs='epsg:3035')
+stacje = geopandas.GeoDataFrame(df, geometry=geopandas.points_from_xy(df.x, df.y), crs='epsg:4326')
+ax = stacje.plot(markersize=2)
+contextily.add_basemap(ax, crs=stacje.crs.to_string())
+plt.show()
+```
+```{r, include=FALSE}
+dane <- read_excel("/Users/alubis/Desktop/dane_semi2.xlsx")
+dane$x= as.numeric(dane$x)
+dane$y= as.numeric(dane$y)
+dane$cena = as.numeric(gsub(",", ".", dane$cena, fixed=TRUE))
+dane$N = dane$`wielkosc ruchu`
+dane$`liczba gwiazdek` = as.numeric(gsub(",", ".", dane$`liczba gwiazdek`, fixed=TRUE))
+dane$`średni spędzany czas (min)`=as.numeric(dane$`średni spędzany czas (min)`)
+dane.sp = dane[1:103,]
+dane.sp = dane.sp %>% dplyr::select(c("x","y"))
+```
+
+The distribution of the average traffic volume and the basic descriptive statistics allow us to notice a clear variation in traffic volume between stations. The station with the most traffic has twice as many average customers per week as the station with the least traffic.
+```{r, message=FALSE, warning=FALSE, fig.cap = 'Figure 2. Distribution of the average number of customers at stations in Warsaw'}
+ggplot(data = dane, aes(x = N)) +
+  geom_histogram(position = 'stack', aes(y = ..count..), color='skyblue')
+```
+```{r, include=FALSE}
+dane <- read.csv("/Users/alubis/geo_project/dane_ost.csv", sep=",")
+dane = cbind(dane, dane.sp)
+```
+
+Variables describing spatial relationships between points will be used for the model. These include the following characteristics: *number of neighboring stations within 5 and 10 km, average distance from the nearest arterial road, average distance from the nearest exit road, distance from the center, distance from the nearest neighboring station. Variables were aggregated at different levels (min, max, mean, median) to compare different types of interactions between points.* The distances given are measured in km, but not in a straight line, but by the shortest access route determined by OSM. For comparison, the length of Warsaw to the west is 28 km. 
+```{r}
+modelformula <- ruch ~ x + y+ min_odl_trunk + max_odl_trunk +
+avg_odl_trunk + min_odl_primary + max_odl_primary + avg_odl_primary + od_centrum + 
+od_stacji_min + od_stacji_max + ile_stacji_r5 + ile_stacji_r10
+modelformula
+```
+There are 120 stations in Warsaw belonging to 5 different networks and with different service and location characteristics. Within a 5 km radius, the average number of neighboring stations is 3.5, while within a 10 km radius, the average is 20 stations. There are points that are located in such a way that they have no neighbor at all within a 5 km radius and at most one within a 10 km radius. In places with the highest density, up to 8 stations are located within 5 km, and up to 43 stations within 10 km. On the other hand, the closest points are located only 600 m from each other. On average, they are 3 km apart, and the farthest distance between points is 8.6 km. Analyzing the data for the average distance from the nearest arterial road and exit road, the average distances are 20 km and 38 km, respectively. 25% of the gas stations are located 1.2 km from the nearest arterial and 4 km from the nearest exit road, while 75% are located 5 and 10 km away.
+
+# 2. Kriging
+
+There are several definitions of this technique, although the most accurate was given by Krige (1981) for metal ores: "a multiple regression procedure for obtaining the best linear unweighted prediction or the best linearly weighted moving average predictor of an ore deposit (of any size) by assigning an optimal set of weights to all available and relevant data inside and outside the ore block."
+
+```{r, include=FALSE}
+# dane punktowe
+dane.sp <- dane
+coordinates(dane.sp) <- c("x","y")
+```
+
+Splitting the dataset into training and testing parts, without considering spatial autocorrelation and spatial sampling of the dataset.
+
+```{r}
+set.seed(1234)
+dane.sp$r<-runif(dim(dane.sp)[1])
+input <- dane.sp[dane.sp$r<0.8, ] # wybranie 80% danych na zbiór treningowy 
+output <- dane.sp[dane.sp$r>0.8, ]
+```
+
+```{r,include=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+pow<-readOGR("/Users/alubis/Desktop/OneDrive/mag/Powiaty", "Powiaty")
+pow<-spTransform(pow, CRS("+proj=longlat +datum=NAD83"))
+pow2 =pow[pow@data[["JPT_NAZWA_"]]=="powiat Warszawa",]
+pow2<-spTransform(pow2, CRS("+proj=merc +datum=NAD83"))
+W<-as(pow2, "owin")
+```
+
+## Ordinary kriging
+Ordinary kriging assumes that the mean value is unknown across the study region.
+```{r, message=FALSE, warning=FALSE, error=FALSE, fig.cap = 'Figure 3. Variogram for the kriging models.'}
+# zwykły kriging (ordinary kriging) 
+set.seed(1234)
+ok.var<- autofitVariogram(ruch~1, input) 
+plot(ok.var)
+## zwykły kriging
+set.seed(1234)
+ok.xy <- autoKrige(ruch~1, input, output, verbose=FALSE, model = c("Sph", "Exp", "Gau", "Ste"), kappa = c(0.05, seq(0.2, 2, 0.1), 5, 10))
+```
+
+## Universal kriging
+
+Universal kriging takes into account the presence of a spatial trend, in the simplest case expressed as a function of Cartesian coordinates, but can also use any additional data (known as spatial accompanying variables).
+espectively. Exponential, spherical, and Gaussian models were used to compute the variograms. 
+```{r, message=FALSE, warning=FALSE, error=FALSE,fig.cap = 'Figure 4. Variograms for the kriging models.'}
+# uniwersalny kriging oparty na funkcji współrzędnych Kartezjańskich 
+set.seed(1234)
+uk.var.1 <- autofitVariogram(ruch~x+y+ min_odl_trunk + max_odl_trunk +
+avg_odl_trunk + min_odl_primary + max_odl_primary + avg_odl_primary + od_centrum + 
+od_stacji_min + od_stacji_max + ile_stacji_r5 + ile_stacji_r10, input) 
+## uniwersalny kriging, x+y
+set.seed(1234)
+uk.xy <- autoKrige(ruch~x+y+ min_odl_trunk + max_odl_trunk +
+avg_odl_trunk + min_odl_primary + max_odl_primary + avg_odl_primary + od_centrum + 
+od_stacji_min + od_stacji_max + ile_stacji_r5 + ile_stacji_r10, input, output, verbose=FALSE, model = c("Sph", "Exp", "Gau", "Ste"), kappa = c(0.05, seq(0.5, 10, 5), 5, 10))
+plot(uk.var.1)
+```
+The fitted variogram model for all cases is a parameterization of the Stein's Matérna covariance function with shape parameter κ in sequence from 0.05 to 2 in 0.1 increments. Sills of all variograms are not flat, indicating the presence of spatial variation in the data.
+
+*Graph of kriging interpolation results:*
+a) original data, 
+b) ordinary kriging, 
+c) universal kriging.
+```{r}
+## original values
+result0<-automapPlot(output, "ruch", main="Original data") 
+result0
+```
+
+```{r}
+## ordinary
+par(mfrow=c(1,2))
+#result1<-automapPlot(ok.xy$krige_output, "var1.pred", main="Ordinary
+#kriging") 
+#result1
+## universal, x+y
+result2<-automapPlot(uk.xy$krige_output, "var1.pred", main="kriging") 
+result2
+```
+Visual analysis suggests that all methods produce roughly similar results.
+
+```{r}
+rmse_ord <- rmse(output$ruch, ok.xy$krige_output@data$var1.pred) 
+rmse_un_xy <- rmse(output$ruch, uk.xy$krige_output@data$var1.pred)
+```
+The RMSE is smallest for ordinary kriging and its value is `r round(rmse_ord,2)` when for the universal kriging it is `r round(rmse_un_xy,2)`.
+
+# 3. Non- spatial ML
+
+Another method that was used for the study was the random forest model. The model without considering the spatial nature of the variables will be the first to be estimated.
+
+```{r, include=FALSE}
+dane$r<-runif(dim(dane)[1])
+train <- dane[dane$r<0.8, ] # wybranie 80% danych na zbiór treningowy 
+test <- dane[dane$r>0.8, ] # wybranie 20% danych na zbiór testowy
+
+regressionMetrics <- function(real, predicted) {
+
+  # simple function that summarizes popular ex-post error measures
+
+  # Mean Square Error
+  MSE <- mean((real - predicted)^2)
+  
+  # Root Mean Squera Error
+  RMSE <- sqrt(MSE)
+  
+  # Mean Absolute Error
+  MAE <- mean(abs(real - predicted))
+  
+  # Median Absolute Error
+  MedAE <- median(abs(real - predicted))
+  
+  # Mean Logarithmic Absolute Error
+  MSLE <- mean((log(1 + real) - log(1 + predicted))^2)
+  
+  # Total Sum of Squares
+  TSS <- sum((real - mean(real))^2)
+  
+  # Explained Sum of Squares
+  RSS <- sum((predicted - real)^2)
+  
+  # R2
+  # R2 <- 1 - RSS/TSS
+  
+  result <- data.frame(MSE, RMSE, MAE, MedAE, MSLE)
+  return(result)
+}
+```
+
+Basic model without hyperparameter optimization with parameter mtry equal to the root of the number of explanatory variables in the model.
+```{r}
+set.seed(1234)
+mtry <- sqrt(ncol(dane))
+random.forest_basic <- randomForest(modelformula,
+                                    data = train,
+                                    ntree = 300,
+                                    #sampsize = 50,
+                                    mtry = mtry,
+                                    importance = TRUE)
+print(random.forest_basic)
+```
+
+```{r}
+a = regressionMetrics(real = test$ruch,
+                  predicted = predict(random.forest_basic, test))
+kable(a, align = "cc", caption = "Table. Metrics for the basic model") %>% kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## The use of cross-validation and optimization of hyperparameters
+
+*The role of cross-validation is:*
+ 1) estimation of prediction error,
+ 2) detection of model overfitting
+ 3) hyperparameter tuning (mainly in machine learning models). 
+ 
+There are different methods for splitting data into training and test data in cross-validation. The most common one is called k-fold crossvalidation. It consists in randomly dividing the sample into k subsamples (usually k=5 in small samples and k=10 in large samples) and running the model k times on k-1 samples, leaving in each iteration 1 subsample as the validation set (different in each of k iterations). In this way, each observation is in the validation set once and k-1 times in the training set.
+
+In this case, mtry parameters from 1 to 15 and the following number of trees will be checked: 50,100,150,300,450,600.
+```{r, message=FALSE, warning=FALSE}
+control <- trainControl(method="repeatedcv", number=5, repeats=3, search="random")
+
+tunegrid <- expand.grid(.mtry=c(1:15), 
+                        .ntree=c(50,100,150,300,450,600))
+
+customRF <- list(type = "Regression", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata, type = "prob")
+
+set.seed(1234)
+random.forest_2 <- 
+  train(modelformula, 
+        data = train, 
+        method= customRF,
+        tuneGrid=tunegrid, 
+        trControl=control)
+
+print(random.forest_2)
+```
+
+The smallest prediction errors are obtained for the parameter mtry equal to `r random.forest_2$bestTune$mtry` and for the number of trees equal to `r random.forest_2$bestTune$ntree`.
+
+```{r, message=FALSE, warning=FALSE, error=FALSE, fig.cap = 'Figure 4. Models results.'}
+plot(random.forest_2)
+```
+
+
+```{r}
+set.seed(1234)
+random.forest <- randomForest(modelformula,
+                                    data = train,
+                                    ntree = random.forest_2$bestTune$ntree,
+                                    sampsize=60,
+                                    mtry = random.forest_2$bestTune$mtry,
+                                    importance = TRUE)
+print(random.forest)
+```
+
+The prediction error values on the test set for the model after hyperparameter optimization are shown in the table below.
+```{r}
+b = regressionMetrics(real = test$ruch,
+                  predicted = predict(random.forest, test))
+kable(b, align = "cc", caption = "Table. Metrics for the model after hyperparameter optimization") %>% kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+# 4. Spatial ML
+
+The results of a cross-validation procedure using spatial sampling can be easily obtained from the sperrorest() function. The names of the columns containing the spatial coordinates needed to implement spatial sampling are defined using a text vector in the coords argument.
+
+```{r, fig.cap = 'Figure 5. Spatial distribution of points from the learning set (black points) and validation set (red points) selected in the validation 5-fold random draw from blocks formed by k-means.'}
+resamp<-partition_cv(train, nfold=5, repetition=5, seed1=1) 
+plot(resamp, train, coords = c("x","y"))
+```
+Estimates for block sampling based on k-means are presented below. In this sampling scheme, k spatial blocks of observations with average counts n/k (where k is the number of folds and n is the number of observations) are determined based on the kmeans algorithm. Their characteristic is the spatial clustering of observations. Then k-1 folds form the training set, and the kth spatially homogeneous cluster is the test set. 
+
+```{r}
+set.seed(1234)
+res_rf_kmeans<-sperrorest(modelformula, data=dane, 
+                          coords = c("x", "y"),
+                          model_fun=randomForest, 
+                          model_args=list(ntree=random.forest_2$bestTune$ntree, mtry=random.forest_2$bestTune$mtry),
+                          smp_fun=partition_kmeans,
+                          progres='all', 
+                          smp_args=list(repetition=1:5, nfold=5, seed1=1234))
+spatial_ml_rmse= res_rf_kmeans$error_rep$test_rmse
+```
+
+# 5. Summary
+
+```{r}
+model= c("ordinary kriging", "universal kriging", "non spatial random forest - basic", "non spatial random forest - tuned", "spatial random forest")
+rmse= c(round(rmse_ord,2), round(rmse_un_xy,2), round(a$RMSE,2), round(b$RMSE,2), round(spatial_ml_rmse,2))
+table = as.data.frame(cbind(model, rmse))
+table$rmse= as.numeric(table$rmse) 
+table=table %>% arrange(rmse)
+kable(table, align = "cc", caption = "Table. RMSE error values for each model on the test set") %>% kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+In summary, the smallest value of prediction errors on the test set is characterized by 'spatial ML'. For the random forest algorithm, the use of spatial resampling and cross-validation produced a better model than the traditional method. Both kriging methods gave worst results.
+
+# 6. Comparison with study results
+
+This study is inspired by the study *"A Machine Learning-Based Approach for Spatial Estimation Using the Spatial Features of Coordinate Information"*. For a dataset characterized by spatial autocorrelation, two methods were applied for comparison. One of them was kriging. Similar to the study by Seongin Ahn and Dong-Woo Ryu, exponential, spherical, and Gaussian models were used to compute the variograms. The sequence of kappa parameter values was also checked and the final kriging model received a prediction error on a test set of size *`r round(rmse_ord,2)`*, with an average predicted number of customers equal to *`r round(mean(train$ruch),2)`* The authors of the paper as another method suitable for use with spatial models was random forest incorporating spatial cross-validation. The results of this model were compared with random forest models without taking into account the spatial nature of the variables (*RMSE `r round(b$RMSE,2)`*). A lower prediction error value was obtained for the spatial model (*`r round(spatial_ml_rmse,2)`*). **The authors of this study concluded that MLAs showed prediction performance and spatial mapping results similar to those of Kriging. We can see similar findings for our study.** Slightly better results were obtained with spatial ML. Another important finding similar to that of the study was that **spatial models improve the accuracy of estimates**. The addition of **spatial variables further improves the quality of the estimates** which is confirmed by obtaining smaller error values by kriging universally rather than ordinal.

@@ -86,9 +86,15 @@ Report structure
 
 \*kriging.R - first part of code
 
-\*model.ipynb - second part of code
+\*spatial_ml.R - spatial models in R
 
-\*summary.Rmd - summary of the project
+\*spatial_ML.py - second part of code
+
+\*final_project.html, final_project.Rmd - summary of the project
+
+\*data.py - scrap
+
+\*variables_OSM.R - calculated variables
 
 \*gitignore
 
